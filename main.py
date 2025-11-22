@@ -1,47 +1,78 @@
-import os
-from openai import AzureOpenAI
+from typing import List
 from dotenv import load_dotenv
-from langchain_openai import AzureChatOpenAI
-from langchain_core.prompts import PromptTemplate
+from langchain.tools import tool
+from langchain.tools import BaseTool
+from langchain_ollama import ChatOllama
+from callbacks import AgentCallbackHandler
+from langchain_core.messages import ToolMessage
+from langchain_core.messages import HumanMessage
+
+# Load environment variables
 load_dotenv()
 
-def main():
+# Decorator converting Python function into LangChain tool
+@tool
+def get_text_length(text: str) -> str:
+    """Returns the length of the text by characters."""
+    print(f"get_text_length enter with {text=}")
+    text = text.strip("'\n").strip('"')
+    return len(text)
 
-    print("LangChain Hello World!")
+def find_tool_by_name(tools: List[BaseTool], tool_name: str) -> BaseTool:
+    """Returns the tool from the list that matches the given name."""
+    for tool in tools:
+        if tool.name == tool_name:
+            return tool
+    raise ValueError(f"Tool wtih name {tool_name} not found")
 
-    information = """
-    Elon Reeve Musk (/ˈiːlɒn/ EE-lon; born June 28, 1971) is a businessman and entrepreneur known for his leadership of Tesla, SpaceX, Twitter, and xAI. Musk has been the wealthiest person in the world since 2021; as of October 2025, Forbes estimates his net worth to be US$500 billion.
-    Born into a wealthy family in Pretoria, South Africa, Musk emigrated in 1989 to Canada; he had obtained Canadian citizenship at birth through his Canadian-born mother. He received bachelor's degrees in 1997 from the University of Pennsylvania in Philadelphia, United States, before moving to California to pursue business ventures. In 1995, Musk co-founded the software company Zip2. Following its sale in 1999, he co-founded X.com, an online payment company that later merged to form PayPal, which was acquired by eBay in 2002. That year, Musk also became an American citizen.
-    """
-
-    summary_template = """
-    Given the information {information} about a person I want you to create:
-    1. A short summary.
-    2. Two interesting facts about them.
-    """
-
-    summary_prompt_template = PromptTemplate(
-        input_variables=["information"], template=summary_template
-    )
-
-    # Initialize Azure OpenAI LLM
-    llm = AzureChatOpenAI(
-        azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"),
-        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-        api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
-        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-        model=os.getenv("AZURE_OPENAI_MODEL_NAME"),
-        temperature=0
-    )
-
-    # Create chain
-    chain = summary_prompt_template | llm
-
-    # Run the chain
-    response = chain.invoke(input={"information": information})
-
-    # Print the response
-    print(response.content)
 
 if __name__ == "__main__":
-    main()
+    # Display startup message
+    print("Hello LangChain Tools (.bind_tools)!")
+    
+    # Define the list of available tools
+    tools = [get_text_length]
+
+    # Initialize the Ollama chat model with configuration
+    llm = ChatOllama(
+        model="llama3.1:8b",
+        temperature=0.0,
+        stop=["\nObservation", "Observation", "Observation:"],
+        callbacks=[AgentCallbackHandler()]
+    )
+
+    # Bind the tools to the LLM for tool calling
+    llm_with_tools = llm.bind_tools(tools)
+
+    # Start conversation
+    messages = [HumanMessage(content="What is the length of the word: DOG")]
+
+    while True:
+        # Invoke the model with the current conversation history
+        ai_message = llm_with_tools.invoke(messages)
+
+        # Retrieve any tool calls the model wants to make
+        tool_calls = getattr(ai_message, "tool_calls", None) or []
+        if len(tool_calls) > 0:
+            # Store the model message that requested tool calls
+            messages.append(ai_message)
+            for tool_call in tool_calls:
+                # Extract the tool name, arguments, and call ID
+                tool_name = tool_call.get("name")
+                tool_args = tool_call.get("args", {})
+                tool_call_id = tool_call.get("id")
+                
+                # Locate the appropriate tool in the list of tools
+                tool_to_use = find_tool_by_name(tools, tool_name)
+                observation = tool_to_use.invoke(tool_args)
+                print(f"observation={observation}")
+                # Add the tool's response back into the message history
+                messages.append(
+                    ToolMessage(content=str(observation), tool_call_id=tool_call_id)
+                )
+            # Allow the model to process the tool results
+            continue
+
+        # If no tool calls are present, treat this as the final answer and exit the loop
+        print(ai_message.content)
+        break
