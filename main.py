@@ -1,78 +1,67 @@
-from typing import List
+import os
 from dotenv import load_dotenv
-from langchain.tools import tool
-from langchain.tools import BaseTool
+from langchain_classic import hub
 from langchain_ollama import ChatOllama
-from callbacks import AgentCallbackHandler
-from langchain_core.messages import ToolMessage
-from langchain_core.messages import HumanMessage
+from langchain_ollama import OllamaEmbeddings
+from langchain_core.prompts import PromptTemplate
+from langchain_pinecone import PineconeVectorStore
+from langchain_classic.chains.retrieval import create_retrieval_chain
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.runnables import RunnablePassthrough
 
 # Load environment variables
 load_dotenv()
 
-# Decorator converting Python function into LangChain tool
-@tool
-def get_text_length(text: str) -> str:
-    """Returns the length of the text by characters."""
-    print(f"get_text_length enter with {text=}")
-    text = text.strip("'\n").strip('"')
-    return len(text)
-
-def find_tool_by_name(tools: List[BaseTool], tool_name: str) -> BaseTool:
-    """Returns the tool from the list that matches the given name."""
-    for tool in tools:
-        if tool.name == tool_name:
-            return tool
-    raise ValueError(f"Tool wtih name {tool_name} not found")
+def format_docs(docs):
+    """Formats documents by extracting their page content and joining them with double newlines."""
+    return "\n\n".join([doc.page_content for doc in docs])
 
 
 if __name__ == "__main__":
     # Display startup message
-    print("Hello LangChain Tools (.bind_tools)!")
-    
-    # Define the list of available tools
-    tools = [get_text_length]
+    print("Retrieving!...")
 
-    # Initialize the Ollama chat model with configuration
-    llm = ChatOllama(
-        model="llama3.1:8b",
-        temperature=0.0,
-        stop=["\nObservation", "Observation", "Observation:"],
-        callbacks=[AgentCallbackHandler()]
+    embeddings = OllamaEmbeddings(model="llama3.1:8b")
+    llm = ChatOllama(model="llama3.1:8b")
+
+    query = "What is Pinecone in Machine Learning?"
+    chain = PromptTemplate.from_template(template=query) | llm
+    result = chain.invoke(input={})
+    print("Response (1):", result.content)
+
+    #----------------------------------------------------------------------
+
+    vectorstore = PineconeVectorStore(embedding=embeddings, index_name=os.getenv("PINECONE_INDEX_NAME"))
+
+    retrieval_qa_chat_prompt = hub.pull("langchain-ai/retrieval-qa-chat")
+
+    combine_docs_chain = create_stuff_documents_chain(llm=llm, prompt=retrieval_qa_chat_prompt)
+
+    retrieval_chain = create_retrieval_chain(retriever=vectorstore.as_retriever(), combine_docs_chain=combine_docs_chain)
+
+    result = retrieval_chain.invoke(input={"input": query})
+    print("Response (2):", result)
+
+    #----------------------------------------------------------------------
+
+    template = """Use the following pieces of context to answer the question at the end.
+    If you don't know the answer, just say that you don't know, don't try to make up an answer.
+    Use three sentences maximum and keep the answer concise and to the point.
+    Always say "thanks for asking!" at the end of the answer.
+    
+    {context}
+    
+    Question: {question}
+    
+    Helpful Answer:"""
+
+    custom_rag_prompt = PromptTemplate.from_template(template=template)
+
+    rag_chain = (
+        {"context": vectorstore.as_retriever() | format_docs, "question": RunnablePassthrough()}
+        | custom_rag_prompt
+        | llm
     )
 
-    # Bind the tools to the LLM for tool calling
-    llm_with_tools = llm.bind_tools(tools)
-
-    # Start conversation
-    messages = [HumanMessage(content="What is the length of the word: DOG")]
-
-    while True:
-        # Invoke the model with the current conversation history
-        ai_message = llm_with_tools.invoke(messages)
-
-        # Retrieve any tool calls the model wants to make
-        tool_calls = getattr(ai_message, "tool_calls", None) or []
-        if len(tool_calls) > 0:
-            # Store the model message that requested tool calls
-            messages.append(ai_message)
-            for tool_call in tool_calls:
-                # Extract the tool name, arguments, and call ID
-                tool_name = tool_call.get("name")
-                tool_args = tool_call.get("args", {})
-                tool_call_id = tool_call.get("id")
-                
-                # Locate the appropriate tool in the list of tools
-                tool_to_use = find_tool_by_name(tools, tool_name)
-                observation = tool_to_use.invoke(tool_args)
-                print(f"observation={observation}")
-                # Add the tool's response back into the message history
-                messages.append(
-                    ToolMessage(content=str(observation), tool_call_id=tool_call_id)
-                )
-            # Allow the model to process the tool results
-            continue
-
-        # If no tool calls are present, treat this as the final answer and exit the loop
-        print(ai_message.content)
-        break
+    result = rag_chain.invoke(input=query)
+    print("Response (3):", result)
