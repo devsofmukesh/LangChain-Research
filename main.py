@@ -3,65 +3,42 @@ from dotenv import load_dotenv
 from langchain_classic import hub
 from langchain_ollama import ChatOllama
 from langchain_ollama import OllamaEmbeddings
-from langchain_core.prompts import PromptTemplate
-from langchain_pinecone import PineconeVectorStore
+from langchain_community.vectorstores import FAISS
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import PyPDFLoader
 from langchain_classic.chains.retrieval import create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
-from langchain_core.runnables import RunnablePassthrough
 
 # Load environment variables
 load_dotenv()
 
-def format_docs(docs):
-    """Formats documents by extracting their page content and joining them with double newlines."""
-    return "\n\n".join([doc.page_content for doc in docs])
-
-
+# Execute this block only if the script is run directly
 if __name__ == "__main__":
-    # Display startup message
-    print("Retrieving!...")
-
+    # Print a simple greeting
+    print("Hi there!")
+    # Initialize the PDF loader with the given file path
+    loader = PyPDFLoader(file_path=os.path.join(os.getcwd(), "ReAct.pdf"))
+    # Load the PDF into document objects
+    documents = loader.load()
+    # Initialize text splitter to chunk the document text
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    # Split the documents into smaller chunks
+    dcoument_chunks = text_splitter.split_documents(documents=documents)
+    # Create an embeddings model for vectorization
     embeddings = OllamaEmbeddings(model="llama3.1:8b")
-    llm = ChatOllama(model="llama3.1:8b")
-
-    query = "What is Pinecone in Machine Learning?"
-    chain = PromptTemplate.from_template(template=query) | llm
-    result = chain.invoke(input={})
-    print("Response (1):", result.content)
-
-    #----------------------------------------------------------------------
-
-    vectorstore = PineconeVectorStore(embedding=embeddings, index_name=os.getenv("PINECONE_INDEX_NAME"))
-
-    retrieval_qa_chat_prompt = hub.pull("langchain-ai/retrieval-qa-chat")
-
-    combine_docs_chain = create_stuff_documents_chain(llm=llm, prompt=retrieval_qa_chat_prompt)
-
-    retrieval_chain = create_retrieval_chain(retriever=vectorstore.as_retriever(), combine_docs_chain=combine_docs_chain)
-
-    result = retrieval_chain.invoke(input={"input": query})
-    print("Response (2):", result)
-
-    #----------------------------------------------------------------------
-
-    template = """Use the following pieces of context to answer the question at the end.
-    If you don't know the answer, just say that you don't know, don't try to make up an answer.
-    Use three sentences maximum and keep the answer concise and to the point.
-    Always say "thanks for asking!" at the end of the answer.
-    
-    {context}
-    
-    Question: {question}
-    
-    Helpful Answer:"""
-
-    custom_rag_prompt = PromptTemplate.from_template(template=template)
-
-    rag_chain = (
-        {"context": vectorstore.as_retriever() | format_docs, "question": RunnablePassthrough()}
-        | custom_rag_prompt
-        | llm
-    )
-
-    result = rag_chain.invoke(input=query)
-    print("Response (3):", result)
+    # Build a FAISS vector store from the document chunks
+    vectorstore = FAISS.from_documents(documents=dcoument_chunks, embedding=embeddings)
+    # Save the FAISS index locally
+    vectorstore.save_local(folder_path="FAISS_INDEX_REACT")
+    # Load the saved FAISS index with permission for unsafe deserialization
+    new_vectorstore = FAISS.load_local(folder_path="FAISS_INDEX_REACT", embeddings=embeddings, allow_dangerous_deserialization=True)
+    # Pull a retrieval QA chat prompt template from LangChain hub
+    retrieval_qa_chat_prompt = hub.pull(owner_repo_commit="langchain-ai/retrieval-qa-chat")
+    # Create a chain that formats and processes retrieved documents
+    combine_docs_chain = create_stuff_documents_chain(llm=ChatOllama(model="llama3.1:8b"), prompt=retrieval_qa_chat_prompt)
+    # Build the retrieval chain using the FAISS retriever and document-combination chain
+    retrieval_chain = create_retrieval_chain(retriever=new_vectorstore.as_retriever(search_kwargs={"k": 8}), combine_docs_chain=combine_docs_chain)
+    # Run the retrieval chain with a query asking for a gist of ReAct
+    result = retrieval_chain.invoke(input={"input": "Give me the gist of ReAct in 3 sentences."})
+    # Print the final answer returned by the chain
+    print(result["answer"])
