@@ -1,0 +1,18 @@
+.stApp {
+    background-color: #1E1E1E;
+    color: #FFFFFF;
+}
+.stTextInput > div > div > input {
+    background-color: #2D2D2D;
+    color: #FFFFFF;
+}
+.stButton > button {
+    background-color: #4CAF50;
+    color: #FFFFFF;
+}
+.stSidebar {
+    background-color: #252526;
+}
+.stMessage {
+    background-color: #2D2D2D;
+}

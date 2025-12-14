@@ -1,44 +1,148 @@
-import os
-from dotenv import load_dotenv
-from langchain_classic import hub
-from langchain_ollama import ChatOllama
-from langchain_ollama import OllamaEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_classic.chains.retrieval import create_retrieval_chain
-from langchain_classic.chains.combine_documents import create_stuff_documents_chain
+# =========================
+# Load Dependencies
+# =========================
 
-# Load environment variables
+import os
+import hashlib
+import requests
+from PIL import Image
+import streamlit as st
+from typing import Set
+from io import BytesIO
+from dotenv import load_dotenv
+from backend.core import run_llm
+
+# =======================================
+# Environment and Streamlit Configuration
+# =======================================
+
+# Load environment variables from .env file
 load_dotenv()
 
-# Execute this block only if the script is run directly
-if __name__ == "__main__":
-    # Print a simple greeting
-    print("Hi there!")
-    # Initialize the PDF loader with the given file path
-    loader = PyPDFLoader(file_path=os.path.join(os.getcwd(), "ReAct.pdf"))
-    # Load the PDF into document objects
-    documents = loader.load()
-    # Initialize text splitter to chunk the document text
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-    # Split the documents into smaller chunks
-    dcoument_chunks = text_splitter.split_documents(documents=documents)
-    # Create an embeddings model for vectorization
-    embeddings = OllamaEmbeddings(model="llama3.1:8b")
-    # Build a FAISS vector store from the document chunks
-    vectorstore = FAISS.from_documents(documents=dcoument_chunks, embedding=embeddings)
-    # Save the FAISS index locally
-    vectorstore.save_local(folder_path="FAISS_INDEX_REACT")
-    # Load the saved FAISS index with permission for unsafe deserialization
-    new_vectorstore = FAISS.load_local(folder_path="FAISS_INDEX_REACT", embeddings=embeddings, allow_dangerous_deserialization=True)
-    # Pull a retrieval QA chat prompt template from LangChain hub
-    retrieval_qa_chat_prompt = hub.pull(owner_repo_commit="langchain-ai/retrieval-qa-chat")
-    # Create a chain that formats and processes retrieved documents
-    combine_docs_chain = create_stuff_documents_chain(llm=ChatOllama(model="llama3.1:8b"), prompt=retrieval_qa_chat_prompt)
-    # Build the retrieval chain using the FAISS retriever and document-combination chain
-    retrieval_chain = create_retrieval_chain(retriever=new_vectorstore.as_retriever(search_kwargs={"k": 8}), combine_docs_chain=combine_docs_chain)
-    # Run the retrieval chain with a query asking for a gist of ReAct
-    result = retrieval_chain.invoke(input={"input": "Give me the gist of ReAct in 3 sentences."})
-    # Print the final answer returned by the chain
-    print(result["answer"])
+# Configure Streamlit page settings
+st.set_page_config(page_title="ChatDocumentation", page_icon="🧊", layout="wide", initial_sidebar_state="expanded")
+
+# Build path to CSS file and apply styles
+css_path = os.path.join(os.getcwd(), "static", "css", "styles.css")
+
+# # Open CSS file safely and apply styles
+with open(file=css_path, mode="r", encoding="utf-8") as cssfile:
+    st.markdown(f"<style>{cssfile.read()}</style>", unsafe_allow_html=True)
+
+# =========================
+# Utility Functions
+# =========================
+
+def create_sources_string(source_urls: Set[str]) -> str:
+    """Generate a formatted string of source URLs."""
+
+    # Format source URLs into a numbered list
+    if not source_urls:
+        return ""
+    
+    # Generate the sources string
+    return "sources:\n" + "\n".join(f"{i}. {url}" for i, url in enumerate(sorted(source_urls), start=1)) + "\n"
+
+def get_profile_picture(email: str) -> Image.Image:
+    """Fetch the Gravatar profile picture for the given email."""
+
+    # Create MD5 hash of the email
+    email = email.strip().lower()
+
+    # Generate URL to fetch Gravatar image
+    email_hash = hashlib.md5(email.encode("utf-8")).hexdigest()
+
+    # Construct Gravatar URL
+    gravatar_url = (f"https://www.gravatar.com/avatar/{email_hash}?d=identicon&s=200")
+
+    # Fetch and return the image
+    response = requests.get(gravatar_url, timeout=5)
+
+    # Raise error for bad response
+    response.raise_for_status()
+
+    # Load and return image
+    return Image.open(BytesIO(response.content))
+
+# =========================
+# Sidebar: User Profile
+# =========================
+
+with st.sidebar:
+    # Display user profile information: image, name, email
+    st.title("User Profile")
+    st.image(image=get_profile_picture(email="devsofmukesh@gmail.com"), width=150)
+    st.write(f"**Name:** Mukesh Kumar")
+    st.write(f"**Developer:** devsofmukesh@gmail.com")
+
+# Display main application header
+st.header("LangChain Chatbot")
+
+# Initialize session state if missing
+if "chat_answers_history" not in st.session_state:
+    st.session_state["chat_answers_history"] = []
+    st.session_state["user_prompt_history"] = []
+    st.session_state["chat_history"] = []
+
+# =========================
+# Layout: Input Section
+# =========================
+
+# Create two columns for a more modern layout
+column1, column2 = st.columns(spec=[2.5, 1])
+
+# Left column: prompt input
+with column1:
+    # Render text input field
+    prompt = st.text_input("Prompt", placeholder="Enter your message here...", label_visibility="collapsed")
+
+# Right column: submit button
+with column2:
+    # Render submit button
+    if st.button("Submit", key="submit", use_container_width=True):
+        prompt = prompt or "Hi there!"
+
+# =========================
+# LLM Invocation Logic
+# =========================
+
+# Execute only when prompt exists
+if prompt:
+
+    # Show spinner during processing
+    with st.spinner("Generating response..."):
+
+        # Call LLM backend
+        generated_response = run_llm(query=prompt, chat_history=st.session_state["chat_history"])
+
+        # Extract unique source URLs
+        sources = set(document.metadata.get("source", "Unknown") for document in generated_response["source_documents"])
+
+        # Format final response with sources
+        formatted_response = (f"{generated_response['result']} \n\n {create_sources_string(sources)}")
+
+        # Store user prompt, generated response, and chat history in session state
+        st.session_state["user_prompt_history"].append(prompt)
+        st.session_state["chat_answers_history"].append(formatted_response)
+        st.session_state["chat_history"].append(("human", prompt))
+        st.session_state["chat_history"].append(("ai", generated_response["result"]))
+
+# =========================
+# Chat History Rendering
+# =========================
+
+# Render chat messages if history exists
+if st.session_state["chat_answers_history"]:
+
+     # Iterate through conversation history
+    for generated_response, user_query in zip(st.session_state["chat_answers_history"], st.session_state["user_prompt_history"]):
+        st.chat_message("user").write(user_query)
+        st.chat_message("assistant").write(generated_response)
+
+# =========================
+# Footer
+# =========================
+
+# Add footer text
+st.markdown("---")
+st.markdown("Powered by LangChain and Streamlit")
