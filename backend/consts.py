@@ -1,1 +1,0 @@
-INDEX_NAME = "documentation-assistant-index"
