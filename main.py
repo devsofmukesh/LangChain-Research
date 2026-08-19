@@ -1,83 +1,119 @@
 # =========================
 # Load Dependencies
 # =========================
-from dotenv import load_dotenv
-from typing import TypedDict, Annotated
-from langchain_core.messages import BaseMessage
-from langchain_core.messages import HumanMessage
-from langgraph.graph.message import add_messages
-from chains import generate_chain, reflect_chain
-from langgraph.graph import MessagesState, StateGraph, END
+
+import uuid
+from typing import Literal
+from executor import execute_tools
+from utils import format_box, format_time
+from chains import revisor, first_responder
+from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.graph import START, END, StateGraph, MessagesState
 
 # =========================
-# Environment Configuration
+# Constants
 # =========================
-load_dotenv()
 
-class MessageGraph(TypedDict):
-    messages: Annotated[list[BaseMessage], add_messages]
+MAX_ITERATIONS = 2
 
-# Define Constants
-REFLECT = "reflect"
-GENERATE = "generate"
+# =========================
+# Draft Node (Initial Response)
+# =========================
 
-def generation_node(state: MessageGraph):
-    """Node function for generating a response based on the current messages."""
-    return {"messages": [generate_chain.invoke({"messages": state["messages"]})]}
+def draft_node(state: MessagesState):
+    """
+    Generate an initial response to the user's question.
+    """
+    response = first_responder.invoke(input={"messages": state["messages"]})
+    message = AIMessage(
+        content=response.answer,
+        tool_calls=[{"name": "AnswerQuestion", "args": response.model_dump(), "id": str(uuid.uuid4())}],
+    )
+    return {"messages": [message]}
 
-def reflection_node(state: MessageGraph):
-    """Node function for reflecting on the current messages and generating a new response."""
-    response = reflect_chain.invoke({"messages": state["messages"]})
-    return {"messages": [HumanMessage(content=response.content)]}
+# =========================
+# Search Node
+# =========================
 
-def should_continue(state: MessageGraph):
-    """"Function to determine whether to continue the loop or end it based on the number of messages."""
-    if len(state["messages"]) >= 6:
+def revise_node(state: MessagesState):
+    """
+    Generate a revised answer based on the critique and search results.
+    """
+    response = revisor.invoke(input={"messages": state["messages"]})
+    message = AIMessage(
+        content=response.answer,
+        tool_calls=[{"name": "ReviseAnswer", "args": response.model_dump(), "id": str(uuid.uuid4())}],
+    )
+    return {"messages": [message]}
+
+# =========================
+# Conditional Edge Function
+# =========================
+
+def event_loop(state: MessagesState) -> Literal["execute_tools", END]:
+    """
+    Determine whether to execute tools based on the number of iterations.
+    If the number of iterations exceeds the maximum allowed, end the process.
+    """
+    count_tool_visits = sum(isinstance(item, ToolMessage) for item in state["messages"])
+    num_iterations = count_tool_visits
+    if num_iterations > MAX_ITERATIONS:
         return END
-    return REFLECT
+    return "execute_tools"
 
-# Build the State Graph
-builder = StateGraph(state_schema=MessageGraph)
-# Add nodes and edges to the graph
-builder.add_node(GENERATE, generation_node)
-# The reflection node will take the output of the generation node as its input, creating a loop between the two nodes.
-builder.add_node(REFLECT, reflection_node)
-# Set the entry point of the graph to the generation node, which will start the process of generating a response based on the initial messages.
-builder.set_entry_point(GENERATE)
-# Add a conditional edge from the generation node to itself, which will allow the graph to continue generating responses until the should_continue function determines that it should end.
-builder.add_conditional_edges(GENERATE, should_continue, path_map={REFLECT: REFLECT, END: END})
-# Add an edge from the reflection node back to the generation node, which will allow the graph to continue reflecting and generating responses until the should_continue function determines that it should end.
-builder.add_edge(REFLECT, GENERATE)
+
+# =========================
+# Graph Builder
+# =========================
+
+# Create the state graph
+builder = StateGraph(MessagesState)
+
+# Register graph nodes
+builder.add_node(node="draft", action=draft_node)              # Generates the initial response
+builder.add_node(node="execute_tools", action=execute_tools)   # Runs required tools/actions
+builder.add_node(node="revise", action=revise_node)            # Refines the response using results
+
+# Define graph flow
+builder.add_edge(start_key=START, end_key="draft")             # Start → Draft
+builder.add_edge(start_key="draft", end_key="execute_tools")   # Draft → Tool execution
+builder.add_edge(start_key="execute_tools", end_key="revise")  # Tools → Revision
+
+# Decide whether to continue looping or finish
+builder.add_conditional_edges(
+    source="revise",
+    path=event_loop,
+    path_map={
+        "execute_tools": "execute_tools",  # Continue refinement loop
+        END: END                           # Stop execution
+    }
+)
+
 # Compile the graph to create an executable version of it.
 graph = builder.compile()
+
 # Draw the Flow as a Mermaid Diagram and save it as a PNG file
 print(graph.get_graph().print_ascii())
 print(graph.get_graph().draw_mermaid())
 graph.get_graph().draw_mermaid_png(output_file_path="flow.png")
 
-if __name__ == "__main__":
-    # Invoke the graph with an initial set of messages to start the process and print the final response.
-    print("Hello LangGraph")
-    
-    # The initial input message is a HumanMessage containing a tweet that we want to improve. 
-    # The graph will process this message through the generation and reflection nodes, iteratively 
-    # improving the response until the stopping condition is met (when there are 6 or more messages in the state).
-    inputs = {
+# =========================
+# Run Example
+# =========================
+
+# Run the graph with an initial user message and print the final response.
+response = graph.invoke(
+    {
         "messages": [
-            HumanMessage(
-                content="""Make this tweet better:"
-                                    @LangChainAI
-            — newly Tool Calling feature is seriously underrated.
-
-            After a long wait, it's  here- making the implementation of agents across different models with function calling - super easy.
-
-            Made a video covering their newest blog post."""
-            )
+            {
+                "role": "user",
+                "content": "Write about AI-Powered SOC / autonomous soc problem domain, list startups that do that and raised capital.",
+            }
         ]
     }
-    # Invoke the graph with the initial messages and print the final response after processing through the graph.
-    response = graph.invoke(inputs)
-    
-    # The final response will be the result of the iterative process of generating and reflecting on the messages,
-    # ultimately producing an improved version of the original tweet.
-    print(response)
+)
+
+# Extract the final answer from the last message with tool calls
+last_message = response["messages"][-1]
+if isinstance(last_message, AIMessage):
+    print(format_box(last_message.content))

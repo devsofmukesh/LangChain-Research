@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "black>=25.9.0",
+    "dotenv>=0.9.9",
     "faiss-cpu>=1.13.1",
     "grandalf>=0.8",
     "isort>=7.0.0",
