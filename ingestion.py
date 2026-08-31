@@ -7,7 +7,6 @@ from dotenv import load_dotenv
 from langchain_chroma import Chroma
 from langchain_ollama import OllamaEmbeddings
 from langchain_unstructured import UnstructuredLoader
-from langchain_community.document_loaders import WebBaseLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
@@ -31,7 +30,7 @@ urls = [
 # =========================
 
 # Get the document content from the urls
-url_contents = [WebBaseLoader(url).load() for url in urls]
+url_contents = [UnstructuredLoader(web_url=url, chunking_strategy="basic", max_characters=1000000).load() for url in urls]
 print(format_box(f"URL Results [Count: {len(url_contents)}]:\n\n {url_contents}", width=150))
 
 # Flatten the list of lists into a single list of documents
