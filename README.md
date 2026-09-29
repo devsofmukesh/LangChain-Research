@@ -1,236 +1,235 @@
-# Agentic RAG with LangGraph
+# mcpdoc
 
-A **self-correcting, adaptive Retrieval-Augmented Generation (RAG)** pipeline built with [LangGraph](https://langchain-ai.github.io/langgraph/), using local models via [Ollama](https://ollama.com/), [Chroma](https://www.trychroma.com/) as the vector store, and [Tavily](https://tavily.com/) as a web-search fallback.
+An MCP server that makes documentation listed in [`llms.txt`](https://llmstxt.org/) available to AI assistants through explicit, inspectable tools.
 
-Instead of a linear "retrieve → generate" chain, this project models RAG as a **stateful graph**. An LLM router first decides whether a question even belongs in the vector store; retrieved documents are graded for relevance before generation; and the generated answer itself is graded for hallucinations and question-relevance, looping back to retry or re-search when it falls short.
+## About
 
----
+`llms.txt` files provide an index of documentation pages for language models. MCP clients such as Cursor, Windsurf, Claude Desktop, and Claude Code can use this server to read a configured set of `llms.txt` sources and fetch relevant pages on demand.
 
-## How the Workflow Works
+The server exposes two tools:
 
-The graph is defined in `graph/graph.py` and orchestrates four nodes, one routing decision at the entry point, and two grading gates around a shared `GraphState`.
+- `list_doc_sources` lists the configured documentation sources.
+- `fetch_docs` reads a configured local source or fetches an allowed HTTP(S) URL and returns its content as Markdown.
 
-```
-                    ┌───────────────┐
-                    │ ROUTE_QUESTION│
-                    └───────┬───────┘
-                (route_question decision)
-              ┌─────────────┴─────────────┐
-              ▼                           ▼
-        ┌──────────┐                ┌───────────┐
-        │ RETRIEVE │                │ WEBSEARCH │◄────────────┐
-        └────┬─────┘                └─────┬─────┘             │
-             ▼                            │                   │
-    ┌──────────────────┐                  │                   │
-    │ GRADE_DOCUMENTS   │                 │                   │
-    └────────┬──────────┘                 │                   │
-     (decide_to_generate)                 │                   │
-     ┌───────┴────────┐                   │                   │
-     ▼                ▼                   │                   │
-┌───────────┐    ┌───────────┐            │                   │
-│ WEBSEARCH │───►│ GENERATE  │◄───────────┘                   │
-└───────────┘    └─────┬─────┘                                │
-                        ▼                                     │
-      (grade_generation_grounded_in_documents_and_question)   │
-       ┌────────────────┼────────────────┐                    │
-       ▼                ▼                ▼                    │
- "unsupported"       "useful"       "not useful"──────────────┘
-   (retry GENERATE)     │
-       │                ▼
-       └──────────►     END
+The intended workflow is to list the sources, read the relevant `llms.txt`, then fetch the documentation pages it links to. Remote pages are fetched over HTTP; local `llms.txt` files can also be configured.
+
+## Requirements and Setup
+
+- Python 3.10 or newer
+- [uv](https://docs.astral.sh/uv/getting-started/installation/)
+- Network access when fetching remote documentation
+
+From the repository root, install the project and its runtime dependencies:
+
+```bash
+uv sync
 ```
 
-**Nodes**
+This creates the project environment and installs the `mcpdoc` command. Check the available command-line options with:
 
-| Node | File | Responsibility |
-|---|---|---|
-| `retrieve` | `graph/nodes/retrieve.py` | Pulls relevant chunks from the Chroma vector store for the incoming question. |
-| `grade_documents` | `graph/nodes/grade_documents.py` | Uses an LLM-based binary relevance grader (`graph/chains/retrieval_grader.py`) to filter out irrelevant documents and flags whether a web search is needed. |
-| `websearch` | `graph/nodes/web_search.py` | Runs a live Tavily search when retrieved documents aren't sufficient (or when the router sends the question straight to the web), and appends the results as an additional document. |
-| `generate` | `graph/nodes/generate.py` | Produces the final answer via `graph/chains/generation.py`, grounded in the (possibly web-augmented) document context. |
+```bash
+uv run mcpdoc --help
+```
 
-**Routing & grading chains**
+To install the development and test tools as well, sync the `test` dependency group:
 
-| Chain | File | Responsibility |
-|---|---|---|
-| `question_router` | `graph/chains/router.py` | Structured-output LLM classifier that routes a question to `"vectorstore"` or `"websearch"` at the graph's **entry point**, based on whether the question matches the vector store's known topics (agents, prompt engineering, adversarial attacks on LLMs). |
-| `retrieval_grader` | `graph/chains/retrieval_grader.py` | Binary relevance grader used inside `grade_documents` for each retrieved document. |
-| `hallucination_grader` | `graph/chains/hallucination_grader.py` | Binary grader checking whether the generated answer is grounded in / supported by the retrieved documents. |
-| `answer_grader` | `graph/chains/answer_grader.py` | Binary grader checking whether the generated answer actually resolves the user's question. |
+```bash
+uv sync --group test
+```
 
-**Conditional routing**
+## Run the Server
 
-- **`route_question`** (graph entry point, in `graph/graph.py`): calls `question_router` and sends the question to `WEBSEARCH` or `RETRIEVE` before anything else has run.
-- **`decide_to_generate`** (after `GRADE_DOCUMENTS`): checks the `web_search` flag in `GraphState` — if any document was irrelevant, it routes to `WEBSEARCH` before `GENERATE`; otherwise it goes straight to `GENERATE`.
-- **`grade_generation_grounded_in_documents_and_question`** (after `GENERATE`): runs `hallucination_grader` then `answer_grader` in sequence:
-  - `"unsupported"` — the answer isn't grounded in the documents → loop back to `GENERATE` and retry.
-  - `"not useful"` — the answer is grounded but doesn't address the question → route back to `WEBSEARCH` for more context.
-  - `"useful"` — the answer is grounded and answers the question → `END`.
+The default transport is `stdio`, which is the usual choice when an MCP client launches the server as a subprocess. This starts the server with the sample LangGraph Python documentation source:
 
-**State** (`graph/state.py`) is a `TypedDict` carrying:
-- `question` — the user's question
-- `generation` — the LLM's final answer
-- `web_search` — bool flag set by the document grader
-- `documents` — list of retrieved/graded/web-augmented documents
+```bash
+uv run mcpdoc --yaml sample_config.yaml
+```
 
-**Models used**
-- LLM: `qwen3.5:9b` via `ChatOllama` — shared across generation, document grading, question routing, hallucination grading, and answer grading (all structured output)
-- Embeddings: `qwen3-embedding:8b` via `OllamaEmbeddings` (ingestion + retrieval)
+For a local HTTP server using SSE transport, specify the host and port:
 
----
+```bash
+uv run mcpdoc \
+  --urls "LangGraph:https://langchain-ai.github.io/langgraph/llms.txt" \
+  --transport sse \
+  --host 127.0.0.1 \
+  --port 8000
+```
+
+The CLI defaults to host `127.0.0.1` and port `8000` for SSE. `--host` and `--port` only apply when `--transport sse` is selected.
+
+## Configuration
+
+Provide documentation sources through a YAML file, a JSON file, or `--urls`. These input methods can be combined; their source lists are merged. Each configured source must have an `llms_txt` value and may have a display `name`.
+
+### YAML
+
+The repository's [`sample_config.yaml`](sample_config.yaml) is:
+
+```yaml
+- name: LangGraph Python
+  llms_txt: https://langchain-ai.github.io/langgraph/llms.txt
+```
+
+Start the server with it using `uv run mcpdoc --yaml sample_config.yaml`.
+
+### JSON
+
+The [`sample_config.json`](sample_config.json) file contains the equivalent configuration:
+
+```json
+[
+  {
+    "name": "LangGraph Python",
+    "llms_txt": "https://langchain-ai.github.io/langgraph/llms.txt"
+  }
+]
+```
+
+Load it with `uv run mcpdoc --json sample_config.json`.
+
+### Command-Line Sources
+
+Pass one or more URL or path entries after `--urls`. Use `name:url` to assign a display name; a name is optional.
+
+```bash
+uv run mcpdoc --urls \
+  "LangGraph:https://langchain-ai.github.io/langgraph/llms.txt" \
+  "LangChain:https://python.langchain.com/llms.txt"
+```
+
+YAML, JSON, and command-line sources can be combined:
+
+```bash
+uv run mcpdoc \
+  --yaml sample_config.yaml \
+  --json sample_config.json \
+  --urls "LangChain:https://python.langchain.com/llms.txt"
+```
+
+Local sources can be provided as a filesystem path or a `file://` URL. Relative paths are resolved from the process's working directory. For example:
+
+```bash
+uv run mcpdoc --urls "LocalDocs:/absolute/path/to/llms.txt"
+```
+
+### Fetch Settings and Domain Access
+
+The server restricts remote fetches by domain:
+
+- The origin of each configured remote `llms.txt` URL is allowed automatically.
+- Add other documentation domains with `--allowed-domains`. For example:
+
+  ```bash
+  uv run mcpdoc \
+    --urls "LangGraph:https://langchain-ai.github.io/langgraph/llms.txt" \
+    --allowed-domains https://docs.example.com/
+  ```
+
+- Use `--allowed-domains '*'` to allow remote URLs from any domain. Only use this when that broader access is intended.
+- For local sources, only the specific local files configured as sources can be read. If a local `llms.txt` links to remote pages, allow those pages' domains with `--allowed-domains`.
+
+Other fetch options:
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `--timeout SECONDS` | `10.0` | HTTP request timeout. |
+| `--follow-redirects` | Off | Follow HTTP redirects; the server also checks HTML meta-refresh redirects when enabled. |
+| `--transport` | `stdio` | MCP transport: `stdio` or `sse`. |
+| `--host` | `127.0.0.1` | Bind address for SSE transport. |
+| `--port` | `8000` | Port for SSE transport. |
+
+Example with a longer timeout and redirects enabled:
+
+```bash
+uv run mcpdoc \
+  --yaml sample_config.yaml \
+  --follow-redirects \
+  --timeout 15
+```
+
+## MCP Client Configuration
+
+For a client that launches the server over `stdio`, point its MCP server command at this checkout. Replace the directory below with the absolute path to your clone; run `uv sync` in that directory first.
+
+```json
+{
+  "mcpServers": {
+    "mcpdoc": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "/absolute/path/to/LangChain-Research",
+        "mcpdoc",
+        "--yaml",
+        "sample_config.yaml"
+      ]
+    }
+  }
+}
+```
+
+MCP clients store this configuration in different locations. Add the entry to the client's MCP server configuration, then restart or reload the client if required. You can change the source by editing the YAML file or replacing `--yaml sample_config.yaml` with `--json sample_config.json` or `--urls` arguments.
+
+## Programmatic Usage
+
+The package also exposes `create_server` for Python callers:
+
+```python
+from mcpdoc.main import create_server
+
+server = create_server(
+    [
+        {
+            "name": "LangGraph Python",
+            "llms_txt": "https://langchain-ai.github.io/langgraph/llms.txt",
+        }
+    ],
+    timeout=15.0,
+    follow_redirects=True,
+)
+server.run(transport="stdio")
+```
+
+`create_server` also accepts `allowed_domains` for additional remote domains and `settings` for MCP server constructor settings.
+
+## Development
+
+Install the `test` dependency group with `uv sync --group test`. The test suite is under `tests/`; run it with:
+
+```bash
+uv run pytest --disable-socket --allow-unix-socket
+```
+
+The Makefile also provides `make test`, `make lint`, and `make format` targets.
 
 ## Project Structure
 
-```
-.
-├── README.md                                          # Project overview, setup, and usage docs (this file)
-├── flow.png                                           # Auto-generated Mermaid diagram of the compiled graph
-├── graph/                                             # Core LangGraph package: state, nodes, chains, routing
-│   ├── __init__.py                                    # Marks graph/ as a package
-│   ├── chains/                                        # LLM-backed chains: routing + grading + generation
-│   │   ├── __init__.py                                # Marks graph/chains/ as a package
-│   │   ├── answer_grader.py                           # answer_grader — checks answer resolves the question
-│   │   ├── generation.py                              # generation_chain (prompt | llm | parser)
-│   │   ├── hallucination_grader.py                    # hallucination_grader — checks answer is grounded in documents
-│   │   ├── retrieval_grader.py                        # retrieval_grader (structured output grader)
-│   │   ├── router.py                                  # question_router — routes a question to vectorstore vs websearch
-│   │   └── tests/                                     # Pytest suite for the chains above
-│   │       ├── __init__.py                            # Marks graph/chains/tests/ as a package
-│   │       └── test_chains.py                         # pytest tests for routing, grading, and generation chains
-│   ├── consts.py                                      # Node name constants
-│   ├── graph.py                                       # StateGraph definition, conditional entry point + edges, 
-│   │                                                  # diagram export
-│   ├── nodes/                                         # Graph node functions (one per pipeline step)
-│   │   ├── __init__.py                                # Re-exports node functions for graph.py to import
-│   │   ├── generate.py                                # generate node — produces the final answer
-│   │   ├── grade_documents.py                         # grade_documents node — filters irrelevant retrieved docs
-│   │   ├── retrieve.py                                # retrieve node — pulls chunks from the Chroma vector store
-│   │   └── web_search.py                              # websearch node — Tavily fallback search
-│   └── state.py                                       # GraphState TypedDict
-├── ingestion.py                                       # Loads seed URLs, chunks them, builds/loads the Chroma store
-├── main.py                                            # Entry point — runs the graph on a sample question
-├── pyproject.toml                                     # Project metadata + dependencies (uv-managed)
-├── requirements.txt                                   # Plain pip-installable dependency list (alt. to uv)
-├── schemas.py                                         # Reflection / AnswerQuestion / ReviseAnswer pydantic schemas
-│                                                      # (scaffolding for a future reflect-and-revise agent; not yet 
-│                                                      # wired into the graph)
-├── utils.py                                           # format_box() and format_time() helpers
-└── uv.lock                                            # Locked dependency versions
+```text
+.                                # Repository root; run the commands in this README from this directory
+├── README.md                    # Project overview, setup, configuration, and usage
+├── Makefile                     # Test, lint, and formatting shortcuts
+├── pyproject.toml               # Package metadata, dependencies, CLI entry point, and tool config
+├── uv.lock                      # Locked dependency versions
+├── sample_config.yaml           # Example YAML documentation source list
+├── sample_config.json           # Example JSON documentation source list
+├── mcpdoc/                      # Installable Python package
+│   ├── __init__.py              # Package exports and version
+│   ├── _version.py              # Installed package version lookup
+│   ├── cli.py                   # mcpdoc command-line interface
+│   ├── main.py                  # MCP server, tools, fetching, and access controls
+│   ├── langgraph.py             # Standalone LangGraph documentation server example
+│   └── splash.py                # CLI banner for SSE startup
+└── tests/                       # Automated test suite
+    └── unit_tests/              # Unit tests for package imports and helpers
+        ├── __init__.py          # Marks unit_tests as a Python package
+        ├── test_imports.py      # Package import checks
+        └── test_main.py         # Tests for main module helpers
 ```
 
----
+### Project Notes
 
-## Prerequisites
-
-- **Python 3.11+**
-- **[uv](https://docs.astral.sh/uv/)** — fast Python package/dependency manager
-- **[Ollama](https://ollama.com/)** installed and running locally, with the required models pulled:
-  ```bash
-  ollama pull qwen3.5:9b
-  ollama pull qwen3-embedding:8b
-  ```
-- A **Tavily API key** (for the web-search fallback node) — get one at [tavily.com](https://tavily.com/)
-
----
-
-## Setup with uv
-
-1. **Install uv** (if you don't already have it):
-   ```bash
-   curl -LsSf https://astral.sh/uv/install.sh | sh
-   ```
-
-2. **Clone the repo and move into it**:
-   ```bash
-   git clone <your-repo-url>
-   cd <your-repo-directory>
-   ```
-
-3. **Create a virtual environment and install dependencies**:
-   ```bash
-   uv sync
-   ```
-   This creates a `.venv/` and installs everything pinned in `pyproject.toml` / `uv.lock`.
-
-   If you're starting from scratch without a `pyproject.toml` yet, initialize one and add the core dependencies:
-   ```bash
-   uv init
-   uv add langgraph langchain-chroma langchain-ollama langchain-unstructured \
-          langchain-community langchain-text-splitters langchain-tavily \
-          langchain-core grandalf python-dotenv wcwidth tqdm pydantic
-   uv add --dev pytest
-   ```
-
-4. **Create your `.env` file** in the project root:
-   ```env
-   TAVILY_API_KEY=your_tavily_api_key_here
-   ```
-
-5. **Make sure Ollama is running** in the background:
-   ```bash
-   ollama serve
-   ```
-
-6. **Build the vector store (first run only)**:
-   In `ingestion.py`, uncomment the `Chroma.from_documents(...)` block so the seed URLs get embedded and persisted to `./.chroma`. Run it once:
-   ```bash
-   uv run ingestion.py
-   ```
-   Then re-comment that block for subsequent runs so you don't re-embed every time — the retriever below it will simply load the persisted `./.chroma` store.
-
----
-
-## Running the App
-
-Run the full agentic RAG graph on the sample question ("What is agent memory?") defined in `main.py`:
-
-```bash
-uv run main.py
-```
-
-This will:
-1. Route the question to the vector store or straight to web search
-2. Retrieve documents from the Chroma store (if routed there) and grade them for relevance
-3. Fall back to a Tavily web search if documents are missing or insufficient
-4. Generate an answer, then grade it for hallucinations and for actually answering the question — retrying generation or falling back to web search again if it doesn't pass
-5. Pretty-print the final answer and source documents in bordered boxes (via `format_box`)
-
-It also prints an ASCII/Mermaid representation of the graph and saves a visual diagram to `flow.png` (rendered via mermaid.ink with an ELK layout; a monkey-patch works around a `grandalf` crash on the graph's self-loop edges when rendering ASCII).
-
----
-
-## Running Tests
-
-Tests live in `graph/chains/tests/test_chains.py` and cover the router, retrieval grader, hallucination grader, and generation chain directly against the live retriever and Ollama models (no mocking), so Ollama must be running and the vector store must already be built.
-
-Run the full test suite with:
-
-```bash
-uv run pytest
-```
-
-Run a specific test, with verbose output:
-
-```bash
-uv run pytest -v -k test_generation_chain
-```
-
-**Tests included:**
-- `test_retrieval_grader_answer_yes` — confirms a relevant document is graded `"yes"` for a matching question.
-- `test_retrieval_grader_answer_no` — confirms the same document is graded `"no"` against an unrelated question.
-- `test_generation_chain` — runs the generation chain end-to-end and prints the answer.
-- `test_hallucination_grader_answer_yes` — confirms a generation produced from retrieved documents is graded as grounded.
-- `test_hallucination_grader_answer_no` — confirms an unrelated, fabricated generation is graded as not grounded.
-- `test_router_to_vectorstore` — confirms an in-domain question (e.g. "agent memory") routes to `"vectorstore"`.
-- `test_router_to_websearch` — confirms an out-of-domain question (e.g. "how to make pizza?") routes to `"websearch"`.
-
----
-
-## Notes / Gotchas
-
-- `graph/nodes/__init__.py` must explicitly re-export the node **functions** (`generate`, `grade_documents`, `retrieve`, `web_search`), not just the submodules — otherwise `graph/graph.py`'s `from graph.nodes import generate, ...` will bind to modules instead of callables and raise a `TypeError` when invoked as `generate(state)`.
-- The Chroma store is persisted to `./.chroma` — delete this directory if you change the embedding model or want to re-ingest from scratch.
-- `web_search` appends a single combined `Document` (all Tavily result contents joined) to the existing `documents` list rather than replacing it.
-- The `"unsupported"` branch of `grade_generation_grounded_in_documents_and_question` loops back to `GENERATE` with **no retry limit** — a persistently ungrounded generation could loop indefinitely. Consider adding a retry counter to `GraphState` if this becomes an issue.
-- `question_router`'s system prompt hard-codes the vector store's topic scope (agents, prompt engineering, adversarial attacks on LLMs) — update it if you ingest different seed URLs in `ingestion.py`.
-- `schemas.py` (`Reflection`, `AnswerQuestion`, `ReviseAnswer`) is not yet consumed by the graph — it's scaffolding for a possible future reflect-and-revise node.
+- The `mcpdoc` command is registered in `pyproject.toml` and starts at `mcpdoc.cli:main`; `mcpdoc/main.py` creates the server and defines its tools.
+- `mcpdoc/langgraph.py` is a standalone LangGraph-specific example. The `mcpdoc` CLI does not use it.
+- `sample_config.yaml` and `sample_config.json` are equivalent examples. Edit either file to select the documentation sources for that run.
+- `uv.lock` records the resolved dependency versions used by `uv sync`; package metadata and dependency groups are declared in `pyproject.toml`.
