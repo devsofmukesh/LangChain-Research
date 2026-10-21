@@ -1,62 +1,66 @@
-# Pinecone Vector Database RAG Demo
+# Pinecone-Powered RAG System
 
-A command-line LangChain example for loading a text document into a Pinecone vector index and asking questions about it. The scripts demonstrate three answer paths: a direct Ollama response, a retrieval chain using a prompt from LangChain Hub, and a custom retrieval-augmented generation (RAG) chain.
+A command-line LangChain project for indexing a text document in Pinecone and asking questions about it. It compares a direct Ollama response with two retrieval-augmented approaches: explicit Python steps and a LangChain Expression Language (LCEL) chain.
 
-## About
+## Project overview
 
-`mediumblog1.txt` is the sample source document: a copied article about vector databases. `ingestion.py` loads and chunks it, creates embeddings locally with Ollama, and writes the chunks to Pinecone. `main.py` compares an answer from the Ollama model alone with answers that retrieve relevant text from the Pinecone index.
+`mediumblog1.txt` is the source article about vector databases. `ingestion.py` loads and chunks the article, creates embeddings with Ollama, and adds them to Pinecone. `main.py` asks a fixed question in three ways:
+
+1. A direct answer from the Ollama chat model, without retrieved context.
+2. A retrieval answer assembled step by step in Python.
+3. A retrieval answer composed with LCEL.
+
+The scripts use `format_box` from `utils.py` to print boxed status and answer output.
 
 ## Workflow
 
-### Ingest the source document
+### Ingest the document
 
 ```mermaid
 flowchart LR
     A[mediumblog1.txt] --> B[TextLoader]
-    B --> C[CharacterTextSplitter: 1000 characters, no overlap]
-    C --> D[Ollama llama3.1:8b embeddings]
+    B --> C[CharacterTextSplitter<br/>1000 characters, no overlap]
+    C --> D[Ollama embedding model]
     D --> E[Pinecone index]
 ```
 
-`ingestion.py` reads the text file from the current working directory, splits its contents with `CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)`, and sends the resulting chunks and embeddings to the Pinecone index named by `PINECONE_INDEX_NAME`.
+`ingestion.py` reads `mediumblog1.txt` from the current working directory and splits it into 1,000-character chunks with no overlap. It embeds the chunks with `OLLAMA_EMBEDDING_MODEL` and sends them to Pinecone. If that variable is unset, ingestion defaults to `nomic-embed-text`.
 
 ### Ask a question
 
 ```mermaid
 flowchart TD
-    A[Hard-coded question] --> B[Direct Ollama answer]
-    A --> C[Retrieve relevant Pinecone chunks]
-    C --> D[LangChain Hub prompt and answer]
-    C --> E[Custom RAG prompt and answer]
+    A[Question] --> B[Direct Ollama chat answer]
+    A --> C[Retrieve top 3 Pinecone chunks]
+    C --> D[Manual retrieval and prompt]
+    C --> E[LCEL retrieval chain]
+    D --> F[Ollama chat model]
+    E --> F
 ```
 
-When `main.py` runs, it asks “What is Pinecone in Machine Learning?” in three ways:
+`main.py` uses `qwen3.5:9b` for chat and `qwen3-embedding:8b` for query embeddings. The retrieval prompt asks the model to answer based only on retrieved context.
 
-1. **Direct model call:** sends the question to `llama3.1:8b` without retrieved context.
-2. **Hub-prompt RAG:** retrieves context from Pinecone and uses the public `langchain-ai/retrieval-qa-chat` prompt.
-3. **Custom RAG:** retrieves context, asks the model not to guess when the context is insufficient, limits the answer to three sentences, and asks it to end with “thanks for asking!”.
+## Requirements
 
-## Requirements and dependencies
-
-- Python **3.13 or newer** (`.python-version` selects 3.13; `pyproject.toml` requires `>=3.13`).
-- [uv](https://docs.astral.sh/uv/) to install the locked Python dependencies.
-- [Ollama](https://ollama.com/) installed and running locally, with `llama3.1:8b` downloaded. The code uses this model for both chat generation and embeddings.
-- A Pinecone account, API key, and an existing index whose vector dimension matches the embeddings produced by the configured Ollama model.
-- Network access to Pinecone and LangChain Hub. The second RAG example pulls its prompt from LangChain Hub when `main.py` runs.
-
-The code uses LangChain, `langchain-community` for `TextLoader`, `langchain-text-splitters`, `langchain-classic` for retrieval chains and Hub prompts, `langchain-ollama`, `langchain-pinecone`, and `python-dotenv`. The project also declares other LangChain providers and development or demo packages that these two scripts do not use directly.
+- Python **3.13 or newer** and [uv](https://docs.astral.sh/uv/).
+- [Ollama](https://ollama.com/) installed and running locally, with the chat and embedding models downloaded.
+- A Pinecone account and API key.
+- A Pinecone index whose vector dimension matches the embedding output. The default `qwen3-embedding:8b` output is 4096 dimensions; verify the index configuration before ingesting.
+- Network access to Pinecone. Ollama runs locally unless `OLLAMA_HOST` points to another compatible service.
 
 ## Setup
 
-### 1. Install Python dependencies
+### 1. Install the project dependencies
 
-From the repository root:
+From the project root:
 
 ```bash
 uv sync
 ```
 
-### 2. Start Ollama and download the model
+`wcwidth`, used by the terminal box formatter, is included in the project dependencies.
+
+### 2. Start Ollama and download the models
 
 If Ollama is not already running, start it in a separate terminal:
 
@@ -64,24 +68,28 @@ If Ollama is not already running, start it in a separate terminal:
 ollama serve
 ```
 
-Download the model used by both scripts:
+Download the models used by `main.py`:
 
 ```bash
-ollama pull llama3.1:8b
+ollama pull qwen3.5:9b
+ollama pull qwen3-embedding:8b
 ```
 
-### 3. Configure Pinecone
+### 3. Configure Pinecone and the embedding model
 
-Create a `.env` file in the repository root with your Pinecone API key and index name:
+Create a `.env` file in the project root:
 
 ```dotenv
 PINECONE_API_KEY=your_pinecone_api_key
 PINECONE_INDEX_NAME=your_existing_index_name
+OLLAMA_EMBEDDING_MODEL=qwen3-embedding:8b
 ```
 
-Create the Pinecone index before running either script. Its vector dimension must match the output dimension of the configured Ollama embedding model. `.env` is ignored by Git; keep the real key local and out of commits.
+The `OLLAMA_EMBEDDING_MODEL` setting is important: `main.py` currently queries with `qwen3-embedding:8b`, while `ingestion.py` defaults to `nomic-embed-text` when the setting is absent. Set it as above so both scripts use the same model. If you choose another embedding model, update the model in `main.py` too and make sure the Pinecone index dimension matches its output.
 
-## Running
+The scripts also accept `INDEX_NAME` as a fallback if your `.env` already uses that variable. `.env` is ignored by Git; keep the real API key out of commits.
+
+## Run the project
 
 Run ingestion first to populate the Pinecone index:
 
@@ -89,35 +97,33 @@ Run ingestion first to populate the Pinecone index:
 uv run python ingestion.py
 ```
 
-Then run the three question-answering examples:
+Then run the three answer approaches:
 
 ```bash
 uv run python main.py
 ```
 
-Run both commands from the repository root. `main.py` prints the direct model response, the Hub-prompt retrieval result, and the custom RAG result.
+Run both commands from the project root. Edit `query` inside `main()` to ask a different question.
 
 ## Project structure
 
 ```text
-.                                           # Repository root for the vector database demo
-├── README.md                               # Project overview, workflows, setup, run steps, and notes
-├── .gitignore                              # Excludes local environments, secrets, and generated files
-├── .python-version                         # Local Python version marker (3.13)
-├── ingestion.py                            # Loads, chunks, embeds, and indexes the sample text
-├── main.py                                 # Runs direct, Hub-prompt RAG, and custom RAG examples
-├── mediumblog1.txt                         # Sample article text about vector databases
-├── pyproject.toml                          # Project metadata and direct dependency declarations
-└── uv.lock                                 # Exact resolved Python dependency versions
+.
+├── README.md          # Project overview, setup, workflow, and notes
+├── .gitignore         # Excludes local environments, credentials, and generated files
+├── .python-version    # Selects Python 3.13
+├── ingestion.py       # Loads, chunks, embeds, and indexes the source article
+├── main.py            # Direct answer, manual retrieval, and LCEL retrieval examples
+├── mediumblog1.txt    # Sample article about vector databases
+├── pyproject.toml     # Project metadata and dependency declarations
+├── utils.py           # Box formatting and time-formatting helpers
+└── uv.lock            # Resolved dependency versions
 ```
 
-## Notes and gotchas
+## Notes
 
-- **Run from the repository root.** `ingestion.py` builds the source path from `os.getcwd()`, so running it from another directory can prevent it from finding `mediumblog1.txt`.
-- **The Pinecone index is not created by these scripts.** Provision it first, set `PINECONE_INDEX_NAME`, and make sure its dimension matches the embedding model.
-- **Re-ingestion does not clear the index or set stable IDs.** Running `ingestion.py` repeatedly may leave duplicate vectors in Pinecone.
-- **The document is a copied web article.** It contains page-navigation text and image-caption fragments as well as article content, so retrieved chunks may include that noise.
-- **The question is hard-coded.** Edit `query` near the top of the `__main__` block in `main.py` to test a different question.
-- **Outputs differ by chain.** The second example prints the retrieval-chain result object; the third prints the model message object. Only the custom prompt includes the three-sentence and closing-phrase instructions.
-- **The Hub-based chain needs network access.** It calls `hub.pull("langchain-ai/retrieval-qa-chat")` at runtime.
-- **Extra dependencies are declared.** Packages for Google GenAI, OpenAI, Tavily, Streamlit, and other experiments are included in `pyproject.toml`, though these scripts do not directly use them.
+- **Pinecone index setup:** These scripts use an existing index; they do not create one. The index dimension must match the embedding vectors.
+- **Re-ingestion:** `ingestion.py` does not clear existing vectors or assign stable IDs. Re-running it may add duplicate records.
+- **Embedding endpoint error:** If the server reports `This server does not support embeddings`, check that `OLLAMA_HOST` points to a service that supports Ollama's `/api/embed` endpoint. If using `llama-server`, start it with embeddings enabled.
+- **Source quality:** The copied article includes page navigation and image-caption text, which may appear in retrieved chunks.
+- **Dependencies:** The project also declares LangChain integrations for Google GenAI, OpenAI, and Tavily, although these scripts do not use them directly.

@@ -15,4 +15,5 @@ dependencies = [
     "langchain-pinecone>=0.2.13",
     "langchain-tavily>=0.2.12",
     "python-dotenv>=1.1.1",
+    "wcwidth>=0.9.3",
 ]

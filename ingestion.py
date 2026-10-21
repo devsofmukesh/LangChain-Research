@@ -1,38 +1,67 @@
+# ==========================
+# Load Dependencies
+# ==========================
+
 import os
+
 from dotenv import load_dotenv
 from langchain_community.document_loaders import TextLoader
-from langchain_text_splitters import CharacterTextSplitter
 from langchain_ollama import OllamaEmbeddings
 from langchain_pinecone import PineconeVectorStore
+from langchain_text_splitters import CharacterTextSplitter
 
-# Load environment variables
+from utils import format_box
+
+# ==========================
+# Load Environment Variables
+# ==========================
+
+# Read Pinecone credentials and configuration from the local environment.
 load_dotenv()
 
 
-if __name__ == "__main__":
-    # Display startup message
-    print("Ingesting!...")
-    
-    # Load text document
-    loader = TextLoader(file_path=os.path.join(os.getcwd(), "mediumblog1.txt"), encoding="utf-8")
+# ==========================
+# Main Execution
+# ==========================
+
+
+def main():
+    """Load the source text, create chunks and embeddings, and index them."""
+
+    # Show a boxed status message before starting the ingestion steps.
+    print(format_box("Starting document ingestion...", width=96))
+
+    # Load the source article from the repository's current working directory.
+    document_path = os.path.join(os.getcwd(), "mediumblog1.txt")
+    loader = TextLoader(file_path=document_path, encoding="utf-8")
     documents = loader.load()
 
-    # Display message about splitting document
-    print("Splitting document into chunks...")
-
-    # Split document into chunks
+    # Split the source documents into chunks for embedding and retrieval.
+    print(format_box("Splitting document into chunks...", width=96))
     text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
     texts = text_splitter.split_documents(documents=documents)
-    print(f"Number of chunks created: {len(texts)}")
+    print(format_box(f"Number of chunks created: {len(texts)}", width=96))
 
-    # Create embedding using Ollama
-    embedding = OllamaEmbeddings(model="llama3.1:8b")
+    # Use a dedicated embedding model, matching the one used by main.py.
+    embedding_model = os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text")
+    embedding = OllamaEmbeddings(model=embedding_model)
 
-    # Create Pinecone vector store and add documents
-    print("Creating vector store and adding documents...")
+    # Store the chunk vectors in the configured Pinecone index.
+    print(format_box("Creating vector store and adding documents...", width=96))
+    index_name = os.getenv("PINECONE_INDEX_NAME") or os.getenv("INDEX_NAME")
+    if not index_name:
+        raise ValueError("Set PINECONE_INDEX_NAME in your .env file.")
 
-    # Initialize Pinecone vector store from documents
-    PineconeVectorStore.from_documents(documents=texts, embedding=embedding, index_name=os.getenv("PINECONE_INDEX_NAME"))
+    PineconeVectorStore.from_documents(
+        documents=texts,
+        embedding=embedding,
+        index_name=index_name,
+    )
 
-    # Display completion message
-    print("Ingestion complete!")
+    # Confirm that ingestion completed successfully.
+    print(format_box("Ingestion complete!", width=96))
+
+
+if __name__ == "__main__":
+    # Run ingestion only when this file is executed as a script.
+    main()
