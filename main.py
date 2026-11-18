@@ -4,13 +4,11 @@
 
 import asyncio
 from pathlib import Path
-
 from dotenv import load_dotenv
 from langchain.agents import create_agent
 from langchain.mcp import MCPAdapter
 from langchain_core.messages import HumanMessage
 from langchain_ollama import ChatOllama
-
 from utils import format_box
 
 # =================================
