@@ -3,11 +3,13 @@
 # =========================
 
 import textwrap
+
 from wcwidth import wcswidth
 
 # =========================
 # Custom Utility Functions
 # =========================
+
 
 def format_box(text: str, width: int = 100) -> str:
     """
@@ -25,10 +27,19 @@ def format_box(text: str, width: int = 100) -> str:
             continue
 
         # Wrap based on approximate character count
-        wrapped_lines.extend(textwrap.wrap(line, width=width, break_long_words=False, break_on_hyphens=False) or [""])
+        wrapped_lines.extend(
+            textwrap.wrap(
+                line, width=width, break_long_words=False, break_on_hyphens=False
+            )
+            or [""]
+        )
 
     # Find actual terminal display width
-    box_width = min(max(wcswidth(line) for line in wrapped_lines), width) if wrapped_lines else 0
+    box_width = (
+        min(max(wcswidth(line) for line in wrapped_lines), width)
+        if wrapped_lines
+        else 0
+    )
     top = "+" + "-" * (box_width + 2) + "+"
 
     # Initialize a list to hold the body lines of the box
@@ -36,7 +47,6 @@ def format_box(text: str, width: int = 100) -> str:
 
     # Loop through each wrapped line and pad it to fit the box width
     for line in wrapped_lines:
-
         # Calculate the display width of the line considering Unicode characters
         display_width = wcswidth(line)
 
@@ -52,6 +62,7 @@ def format_box(text: str, width: int = 100) -> str:
     # Return the complete box as a string
     return f"{top}\n{body}\n{top}"
 
+
 def format_time(start_time, end_time) -> str:
     """Calculate and format elapsed time between start_time and end_time as HH:MM:SS."""
 
@@ -60,10 +71,10 @@ def format_time(start_time, end_time) -> str:
 
     # Use divmod to calculate hours, minutes, and seconds
     hh, remainder = divmod(total_seconds, 3600)
-    mm, ss        = divmod(remainder, 60)
+    mm, ss = divmod(remainder, 60)
 
     # Format the time as HH:MM:SS
-    time_taken    = f"{hh:02}:{mm:02}:{ss:02}"
+    time_taken = f"{hh:02}:{mm:02}:{ss:02}"
 
     # Return the formatted time string
     return f"{time_taken} (HH:MM:SS)"
